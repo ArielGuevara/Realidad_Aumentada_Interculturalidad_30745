@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, StyleSheet, TouchableOpacity, Text,
   ActivityIndicator, PanResponder, Dimensions
@@ -10,6 +10,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { Asset } from 'expo-asset';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+
 
 export default function ARScreen({ route }: any) {
   const [permission, requestPermission] = useCameraPermissions();
@@ -335,8 +336,10 @@ export default function ARScreen({ route }: any) {
     };
 
     // Rota el modelo
-    window.rotateModel = function(dy) {
-      if (window.currentModel) window.currentModel.rotation.y += dy * 0.01;
+    window.rotateModel = function(deg) {
+      if (window.currentModel) {
+        window.currentModel.rotation.y += (deg * Math.PI / 180);
+      }
     };
 
     // Rotación libre con dos dedos
@@ -625,6 +628,43 @@ export default function ARScreen({ route }: any) {
     );
   }
 
+  function ContinuousButton({
+      label, style, textStyle, onTick, intervalMs = 50
+    }: {
+      label: string;
+      style: any;
+      textStyle: any;
+      onTick: () => void;
+      intervalMs?: number;
+    }) {
+      const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+      const startPress = useCallback(() => {
+        onTick(); // Ejecuta inmediatamente al tocar
+        intervalRef.current = setInterval(() => {
+          onTick();
+        }, intervalMs);
+      }, [onTick, intervalMs]);
+
+      const stopPress = useCallback(() => {
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+      }, []);
+
+      return (
+        <TouchableOpacity
+          style={style}
+          onPressIn={startPress}
+          onPressOut={stopPress}
+          activeOpacity={0.7}
+        >
+          <Text style={textStyle}>{label}</Text>
+        </TouchableOpacity>
+      );
+    }
+
   return (
     <View style={styles.container}>
       {/* Cámara de fondo */}
@@ -659,16 +699,28 @@ export default function ARScreen({ route }: any) {
       {/* Botones de escala */}
       {modelLoaded && (
         <View style={styles.scaleControls}>
-          <TouchableOpacity style={styles.scaleBtn} onPress={() => webviewRef.current?.injectJavaScript('window.scaleModel(1.05); true;')}>
-            <Text style={styles.scaleBtnText}>＋</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.scaleBtn} onPress={() => webviewRef.current?.injectJavaScript('window.scaleModel(0.95); true;')}>
-            <Text style={styles.scaleBtnText}>－</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.scaleBtn} onPress={() => webviewRef.current?.injectJavaScript('window.rotateModel(10); true;')}>
-            <Text style={styles.scaleBtnText}>↻</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.scaleBtn, { backgroundColor: 'rgba(255,100,100,0.8)' }]} onPress={() => webviewRef.current?.injectJavaScript('window.resetScale(); true;')}>
+          <ContinuousButton
+            label="＋"
+            style={styles.scaleBtn}
+            textStyle={styles.scaleBtnText}
+            onTick={() => webviewRef.current?.injectJavaScript('window.scaleModel(1.02); true;')}
+          />
+          <ContinuousButton
+            label="－"
+            style={styles.scaleBtn}
+            textStyle={styles.scaleBtnText}
+            onTick={() => webviewRef.current?.injectJavaScript('window.scaleModel(0.98); true;')}
+          />
+          <ContinuousButton
+            label="↻"
+            style={styles.scaleBtn}
+            textStyle={styles.scaleBtnText}
+            onTick={() => webviewRef.current?.injectJavaScript('window.rotateModel(3); true;')}
+          />
+          <TouchableOpacity
+            style={[styles.scaleBtn, { backgroundColor: 'rgba(255,100,100,0.8)' }]}
+            onPress={() => webviewRef.current?.injectJavaScript('window.resetScale(); true;')}
+          >
             <Text style={styles.scaleBtnText}>⟳</Text>
           </TouchableOpacity>
         </View>
