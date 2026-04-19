@@ -11,7 +11,7 @@ import { Asset } from 'expo-asset';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
-export default function ARScreen() {
+export default function ARScreen({ route }: any) {
   const [permission, requestPermission] = useCameraPermissions();
   const [htmlUri, setHtmlUri] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(true);
@@ -26,11 +26,84 @@ export default function ARScreen() {
 
   // Posición y escala del modelo AR
   const modelPos = useRef({ x: 0, y: 0, scale: 1.0 });
+  const viewerReady = useRef(false);
+  const pendingModel = useRef<{uri: string, name: string} | null>(null);
 
   useEffect(() => {
     requestPermission();
     prepareViewer();
   }, []);
+
+   useEffect(() => {
+    if (route?.params?.modelUri) {
+      const uri = route.params.modelUri;
+      const name = route.params.modelName || 'modelo.glb';
+      console.log('Modelo desde galería:', name);
+      if (viewerReady.current) {
+        loadModelFromUri(uri, name);
+      } else {
+        pendingModel.current = { uri, name };
+      }
+    }
+  }, [route?.params?.modelUri]);
+
+  const loadModelFromUri = async (uri: string, name: string) => {
+    try {
+      setLoading(true);
+      console.log('Cargando desde URI:', uri);
+      const base64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      console.log('Base64 length:', base64.length);
+      const safeName = name.replace(/[`\\$'"]/g, '');
+      const CHUNK = 500000;
+      const chunks: string[] = [];
+      for (let i = 0; i < base64.length; i += CHUNK) {
+        chunks.push(base64.slice(i, i + CHUNK));
+      }
+      console.log('Enviando en', chunks.length, 'chunks');
+
+      webviewRef.current?.injectJavaScript(`
+        window._mb = new Array(${chunks.length});
+        window._mt = ${chunks.length};
+        window._mr = 0;
+        window._mn = '${safeName}';
+        document.getElementById('status').style.display = 'block';
+        document.getElementById('status').style.color = '#fff';
+        document.getElementById('status').textContent = 'Cargando modelo...';
+        true;
+      `);
+
+      for (let i = 0; i < chunks.length; i++) {
+        const escaped = chunks[i]
+          .replace(/\\/g, '\\\\')
+          .replace(/`/g, '\\`')
+          .replace(/\$/g, '\\$');
+        await new Promise<void>((resolve) => {
+          setTimeout(() => {
+            webviewRef.current?.injectJavaScript(`
+              window._mb[${i}] = \`${escaped}\`;
+              window._mr++;
+              document.getElementById('status').textContent = 'Cargando ${i + 1}/${chunks.length}...';
+              if (window._mr === window._mt) {
+                document.getElementById('status').textContent = 'Procesando modelo 3D...';
+                setTimeout(function() {
+                  window.loadModel(window._mb.join(''), window._mn);
+                  window._mb = null;
+                }, 100);
+              }
+              true;
+            `);
+            resolve();
+          }, i * 10);
+        });
+      }
+      setLoading(false);
+    } catch (e) {
+      console.error('Error cargando modelo:', e);
+      setLoading(false);
+    }
+  };
 
   const prepareViewer = async () => {
     try {
@@ -210,6 +283,7 @@ export default function ARScreen() {
           window.scn.add(window.currentModel);
 
           window.animations = gltf.animations || [];
+          postToRN({ type: 'DEBUG', msg: 'Animaciones encontradas: ' + window.animations.length + ' | Escenas: ' + (gltf.scenes ? gltf.scenes.length : 0) });
           if (window.animations.length > 0) {
             window.mixer = new THREE.AnimationMixer(window.currentModel);
             var animNames = window.animations.map(function(a, i) {
@@ -255,14 +329,23 @@ export default function ARScreen() {
     // Mueve el modelo en la escena AR
     window.moveModel = function(dx, dy) {
       if (window.currentModel) {
-        window.currentModel.position.x += dx * 0.003;
-        window.currentModel.position.y -= dy * 0.003;
+        window.currentModel.position.x += dx * 0.012;
+        window.currentModel.position.y -= dy * 0.012;
       }
     };
 
     // Rota el modelo
     window.rotateModel = function(dy) {
       if (window.currentModel) window.currentModel.rotation.y += dy * 0.01;
+    };
+
+    // Rotación libre con dos dedos
+    window.rotateModelFree = function(rx, ry) {
+      if (!window.currentModel) return;
+      window.currentModel.rotation.y += ry;
+      window.currentModel.rotation.x += rx;
+      // Limita rotación en X para que no se voltee completamente
+      window.currentModel.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, window.currentModel.rotation.x));
     };
 
     // Escala el modelo
@@ -301,7 +384,15 @@ export default function ARScreen() {
   const handleWebViewMessage = (e: any) => {
     try {
       const msg = JSON.parse(e.nativeEvent.data);
-      if (msg.type === 'ANIMATIONS_READY') {
+      if (msg.type === 'SCENE_READY') {
+        viewerReady.current = true;
+        // Si hay un modelo pendiente desde la galería, cárgalo
+        if (pendingModel.current) {
+          const { uri, name } = pendingModel.current;
+          pendingModel.current = null;
+          loadModelFromUri(uri, name);
+        }
+      } else if (msg.type === 'ANIMATIONS_READY') {
         setAnimations(msg.animations);
         setCurrentAnim(null);
       } else if (msg.type === 'MODEL_LOADED') {
@@ -314,30 +405,82 @@ export default function ARScreen() {
 
   const pickModel = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true });
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        copyToCacheDirectory: true,
+      });
       if (result.canceled) return;
       const file = result.assets[0];
+      console.log('Archivo:', file.name, 'tamaño:', file.size);
       setLoading(true);
-      const base64 = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 });
-      const safeName = file.name.replace(/[`\\$'"]/g, '');
-      const CHUNK = 50000;
-      const chunks: string[] = [];
-      for (let i = 0; i < base64.length; i += CHUNK) chunks.push(base64.slice(i, i + CHUNK));
 
-      webviewRef.current?.injectJavaScript(`
-        window._mb = new Array(${chunks.length}); window._mt = ${chunks.length}; window._mr = 0; window._mn = '${safeName}'; true;
-      `);
-      for (let i = 0; i < chunks.length; i++) {
-        const escaped = chunks[i].replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
-        await new Promise<void>(resolve => setTimeout(() => {
-          webviewRef.current?.injectJavaScript(`
-            window._mb[${i}] = \`${escaped}\`; window._mr++;
-            if (window._mr === window._mt) { window.loadModel(window._mb.join(''), window._mn); window._mb = null; }
-            true;
-          `);
-          resolve();
-        }, i * 50));
+      // Copia el archivo al directorio de documentos
+      const destDir = FileSystem.documentDirectory + 'models/';
+      await FileSystem.makeDirectoryAsync(destDir, { intermediates: true });
+      const destPath = destDir + file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      await FileSystem.copyAsync({ from: file.uri, to: destPath });
+      console.log('Archivo copiado a:', destPath);
+
+      // Lee el archivo como base64 en partes usando streams
+      const fileInfo = await FileSystem.getInfoAsync(destPath);
+      console.log('Tamaño en disco:', fileInfo);
+
+      // Lee todo el archivo de una vez (más eficiente que chunks para filesystem local)
+      const base64 = await FileSystem.readAsStringAsync(destPath, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      console.log('Base64 length:', base64.length);
+
+      const safeName = file.name.replace(/[`\\$'"]/g, '');
+
+      // Para archivos grandes usamos chunks más grandes y menos delay
+      const CHUNK = 500000; // 500KB por chunk
+      const chunks: string[] = [];
+      for (let i = 0; i < base64.length; i += CHUNK) {
+        chunks.push(base64.slice(i, i + CHUNK));
       }
+      console.log('Enviando en', chunks.length, 'chunks de 500KB');
+
+      // Inicializa buffer en WebView
+      webviewRef.current?.injectJavaScript(`
+        window._mb = new Array(${chunks.length});
+        window._mt = ${chunks.length};
+        window._mr = 0;
+        window._mn = '${safeName}';
+        document.getElementById('status').style.display = 'block';
+        document.getElementById('status').style.color = '#fff';
+        document.getElementById('status').textContent = 'Preparando modelo...';
+        true;
+      `);
+
+      // Envía chunks con procesamiento asíncrono
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const escaped = chunk
+          .replace(/\\/g, '\\\\')
+          .replace(/`/g, '\\`')
+          .replace(/\$/g, '\\$');
+
+        await new Promise<void>((resolve) => {
+          setTimeout(() => {
+            webviewRef.current?.injectJavaScript(`
+              window._mb[${i}] = \`${escaped}\`;
+              window._mr++;
+              document.getElementById('status').textContent = 'Cargando ${i + 1}/${chunks.length}...';
+              if (window._mr === window._mt) {
+                document.getElementById('status').textContent = 'Procesando modelo 3D...';
+                setTimeout(function() {
+                  window.loadModel(window._mb.join(''), window._mn);
+                  window._mb = null;
+                }, 100);
+              }
+              true;
+            `);
+            resolve();
+          }, i * 10); // Solo 10ms de delay entre chunks
+        });
+      }
+
       setLoading(false);
     } catch (e) {
       console.error('Error modelo:', e);
@@ -345,14 +488,117 @@ export default function ARScreen() {
     }
   };
 
+  const lastTouch = useRef<{x: number, y: number} | null>(null);
+  const lastTwoTouches = useRef<{x1: number, y1: number, x2: number, y2: number} | null>(null);
+  const gestureMode = useRef<'move' | 'rotate-zoom' | null>(null);
+
+  const getDistance = (x1: number, y1: number, x2: number, y2: number) => {
+    return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+  };
+
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gs) => {
-        webviewRef.current?.injectJavaScript(
-          `window.moveModel(${gs.vx * 5}, ${gs.vy * 5}); true;`
-        );
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+
+      onPanResponderGrant: (e) => {
+        const touches = e.nativeEvent.touches;
+        if (touches.length === 1) {
+          gestureMode.current = 'move';
+          lastTouch.current = { x: touches[0].pageX, y: touches[0].pageY };
+          lastTwoTouches.current = null;
+        } else if (touches.length >= 2) {
+          gestureMode.current = 'rotate-zoom';
+          lastTouch.current = null;
+          lastTwoTouches.current = {
+            x1: touches[0].pageX, y1: touches[0].pageY,
+            x2: touches[1].pageX, y2: touches[1].pageY,
+          };
+        }
+      },
+
+      onPanResponderMove: (e) => {
+        const touches = e.nativeEvent.touches;
+
+        if (touches.length >= 2) {
+          // Cambia a modo rotate-zoom si llega un segundo dedo
+          gestureMode.current = 'rotate-zoom';
+          lastTouch.current = null;
+
+          const curr = {
+            x1: touches[0].pageX, y1: touches[0].pageY,
+            x2: touches[1].pageX, y2: touches[1].pageY,
+          };
+
+          if (lastTwoTouches.current) {
+            // Rotación — movimiento del punto medio
+            const prevMidX = (lastTwoTouches.current.x1 + lastTwoTouches.current.x2) / 2;
+            const prevMidY = (lastTwoTouches.current.y1 + lastTwoTouches.current.y2) / 2;
+            const currMidX = (curr.x1 + curr.x2) / 2;
+            const currMidY = (curr.y1 + curr.y2) / 2;
+            const rotY = (currMidX - prevMidX) * 0.03;
+            const rotX = (currMidY - prevMidY) * 0.03;
+
+            // Zoom — cambio de distancia entre dedos
+            const prevDist = getDistance(
+              lastTwoTouches.current.x1, lastTwoTouches.current.y1,
+              lastTwoTouches.current.x2, lastTwoTouches.current.y2
+            );
+            const currDist = getDistance(curr.x1, curr.y1, curr.x2, curr.y2);
+            const distDiff = currDist - prevDist;
+            const scaleFactor = distDiff > 0
+              ? 1 + (distDiff * 0.008)
+              : 1 - (Math.abs(distDiff) * 0.008);
+
+            if (Math.abs(rotX) > 0.001 || Math.abs(rotY) > 0.001) {
+              webviewRef.current?.injectJavaScript(
+                `window.rotateModelFree(${rotX}, ${rotY}); true;`
+              );
+            }
+            if (Math.abs(scaleFactor - 1) > 0.001) {
+              webviewRef.current?.injectJavaScript(
+                `window.scaleModel(${scaleFactor}); true;`
+              );
+            }
+          }
+
+          lastTwoTouches.current = curr;
+
+        } else if (touches.length === 1 && gestureMode.current === 'move') {
+          // Un dedo — mover modelo
+          if (lastTouch.current) {
+            const dx = touches[0].pageX - lastTouch.current.x;
+            const dy = touches[0].pageY - lastTouch.current.y;
+            if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+              webviewRef.current?.injectJavaScript(
+                `window.moveModel(${dx * 0.3}, ${dy * 0.3}); true;`
+              );
+            }
+          }
+          lastTouch.current = { x: touches[0].pageX, y: touches[0].pageY };
+        }
+      },
+
+      onPanResponderRelease: (e) => {
+        const touches = e.nativeEvent.touches;
+        if (touches.length === 0) {
+          gestureMode.current = null;
+          lastTouch.current = null;
+          lastTwoTouches.current = null;
+        } else if (touches.length === 1) {
+          // Quedó un dedo — cambia a modo move
+          gestureMode.current = 'move';
+          lastTouch.current = { x: touches[0].pageX, y: touches[0].pageY };
+          lastTwoTouches.current = null;
+        }
+      },
+
+      onPanResponderTerminate: () => {
+        gestureMode.current = null;
+        lastTouch.current = null;
+        lastTwoTouches.current = null;
       },
     })
   ).current;
@@ -386,7 +632,7 @@ export default function ARScreen() {
 
       {/* WebView transparente encima */}
       {htmlUri && (
-        <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers}>
+        <View style={StyleSheet.absoluteFill}>
           <WebView
             ref={webviewRef}
             style={styles.webview}
@@ -400,6 +646,12 @@ export default function ARScreen() {
             bounces={false}
             onError={(e) => console.error('WebView error:', e.nativeEvent)}
             onMessage={handleWebViewMessage}
+          />
+          {/* Overlay transparente que captura los gestos SIN bloquear el WebView */}
+          <View
+            style={StyleSheet.absoluteFill}
+            {...panResponder.panHandlers}
+            pointerEvents="box-only"
           />
         </View>
       )}
@@ -421,9 +673,16 @@ export default function ARScreen() {
           </TouchableOpacity>
         </View>
       )}
+        
+      {modelLoaded && (
+        <View style={styles.hint}>
+          <Text style={styles.hintText}>☝️ Mover  ✌️ Rotar  🤏 Zoom</Text>
+        </View>
+      )}
 
       {/* Panel de animaciones */}
       {animations.length > 0 && showControls && (
+
         <View style={styles.animPanel}>
           <Text style={styles.panelTitle}>🎬 Animaciones</Text>
           {animations.map((anim) => (
@@ -459,6 +718,11 @@ export default function ARScreen() {
           </View>
         </View>
       )}
+      {modelLoaded && animations.length === 0 && (
+        <View style={styles.noAnimPanel}>
+          <Text style={styles.noAnimText}>📭 Sin animaciones</Text>
+        </View>
+      )}
 
       {/* Barra inferior */}
       <View style={styles.bottomBar}>
@@ -472,12 +736,19 @@ export default function ARScreen() {
         )}
       </View>
 
+        
       {loading && (
         <View style={styles.loadingOverlay}>
           <ActivityIndicator size="large" color="#6c63ff" />
-          <Text style={{ color: '#fff', marginTop: 8 }}>Cargando modelo...</Text>
+          <Text style={{ color: '#fff', marginTop: 8, fontSize: 16, fontWeight: 'bold' }}>
+            Cargando modelo...
+          </Text>
+          <Text style={{ color: '#aaa', marginTop: 4, fontSize: 12, textAlign: 'center', paddingHorizontal: 40 }}>
+            Los modelos grandes pueden tardar{'\n'}unos segundos
+          </Text>
         </View>
       )}
+      
     </View>
   );
 }
@@ -526,5 +797,31 @@ const styles = StyleSheet.create({
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject, justifyContent: 'center',
     alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)',
+  },noAnimPanel: {
+    position: 'absolute',
+    top: 60,
+    right: 10,
+    backgroundColor: 'rgba(16,16,40,0.85)',
+    borderRadius: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(108,99,255,0.3)',
+  },
+  noAnimText: {
+    color: '#888',
+    fontSize: 11,
+  },
+  hint: {
+    position: 'absolute',
+    bottom: 100,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  hintText: {
+    color: '#fff',
+    fontSize: 12,
   },
 });

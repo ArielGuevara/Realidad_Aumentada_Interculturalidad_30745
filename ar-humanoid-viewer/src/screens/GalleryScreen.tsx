@@ -93,8 +93,12 @@ export default function GalleryScreen({ navigation }: Props) {
   };
 
   const openInAR = (model: ModelItem) => {
-    navigation.navigate('AR', { modelUri: model.uri, modelName: model.name });
-  };
+    navigation.navigate('AR', {
+      modelUri: model.uri,
+      modelName: model.name,
+      timestamp: Date.now(), // Fuerza re-render aunque sea el mismo modelo
+    });
+  }; 
 
   const renderModel = ({ item }: { item: ModelItem }) => (
     <View style={styles.card}>
