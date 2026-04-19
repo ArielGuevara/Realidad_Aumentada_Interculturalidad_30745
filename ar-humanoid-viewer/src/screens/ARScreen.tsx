@@ -206,6 +206,7 @@ export default function ARScreen() {
           window.currentModel.scale.setScalar(scale);
           window.currentModel.position.sub(center.multiplyScalar(scale));
           window.currentModel.position.y = -0.5;
+          window.initialScale = scale;
           window.scn.add(window.currentModel);
 
           window.animations = gltf.animations || [];
@@ -254,8 +255,8 @@ export default function ARScreen() {
     // Mueve el modelo en la escena AR
     window.moveModel = function(dx, dy) {
       if (window.currentModel) {
-        window.currentModel.position.x += dx * 0.01;
-        window.currentModel.position.y -= dy * 0.01;
+        window.currentModel.position.x += dx * 0.003;
+        window.currentModel.position.y -= dy * 0.003;
       }
     };
 
@@ -266,10 +267,19 @@ export default function ARScreen() {
 
     // Escala el modelo
     window.scaleModel = function(factor) {
-      if (window.currentModel) {
-        var s = window.currentModel.scale.x * factor;
-        s = Math.max(0.1, Math.min(5.0, s));
-        window.currentModel.scale.setScalar(s);
+      if (!window.currentModel) return;
+      var current = window.currentModel.scale.x;
+      var next = current * factor;
+      var min = window.initialScale * 0.3;
+      var max = window.initialScale * 3.0;
+      next = Math.max(min, Math.min(max, next));
+      window.currentModel.scale.setScalar(next);
+    };
+
+    window.resetScale = function() {
+      if (window.currentModel && window.initialScale) {
+        window.currentModel.scale.setScalar(window.initialScale);
+        window.currentModel.position.set(0, -0.5, 0);
       }
     };
 
@@ -335,13 +345,13 @@ export default function ARScreen() {
     }
   };
 
-  // PanResponder para mover el modelo con el dedo
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
       onPanResponderMove: (_, gs) => {
         webviewRef.current?.injectJavaScript(
-          `window.moveModel(${gs.dx}, ${gs.dy}); true;`
+          `window.moveModel(${gs.vx * 5}, ${gs.vy * 5}); true;`
         );
       },
     })
@@ -397,14 +407,17 @@ export default function ARScreen() {
       {/* Botones de escala */}
       {modelLoaded && (
         <View style={styles.scaleControls}>
-          <TouchableOpacity style={styles.scaleBtn} onPress={() => webviewRef.current?.injectJavaScript('window.scaleModel(1.2); true;')}>
+          <TouchableOpacity style={styles.scaleBtn} onPress={() => webviewRef.current?.injectJavaScript('window.scaleModel(1.05); true;')}>
             <Text style={styles.scaleBtnText}>＋</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.scaleBtn} onPress={() => webviewRef.current?.injectJavaScript('window.scaleModel(0.8); true;')}>
+          <TouchableOpacity style={styles.scaleBtn} onPress={() => webviewRef.current?.injectJavaScript('window.scaleModel(0.95); true;')}>
             <Text style={styles.scaleBtnText}>－</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.scaleBtn} onPress={() => webviewRef.current?.injectJavaScript('window.rotateModel(10); true;')}>
             <Text style={styles.scaleBtnText}>↻</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.scaleBtn, { backgroundColor: 'rgba(255,100,100,0.8)' }]} onPress={() => webviewRef.current?.injectJavaScript('window.resetScale(); true;')}>
+            <Text style={styles.scaleBtnText}>⟳</Text>
           </TouchableOpacity>
         </View>
       )}
