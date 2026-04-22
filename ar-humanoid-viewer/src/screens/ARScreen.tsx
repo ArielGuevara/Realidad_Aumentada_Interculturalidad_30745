@@ -12,7 +12,7 @@ import { Asset } from 'expo-asset';
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 
-export default function ARScreen({ route }: any) {
+export default function ARScreen({ route, navigation }: any) {
   const [permission, requestPermission] = useCameraPermissions();
   const [htmlUri, setHtmlUri] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(true);
@@ -28,7 +28,7 @@ export default function ARScreen({ route }: any) {
   // Posición y escala del modelo AR
   const modelPos = useRef({ x: 0, y: 0, scale: 1.0 });
   const viewerReady = useRef(false);
-  const pendingModel = useRef<{uri: string, name: string} | null>(null);
+  const pendingModel = useRef<{uri: string, name: string, base64?: string} | null>(null);
 
   useEffect(() => {
     requestPermission();
@@ -39,14 +39,22 @@ export default function ARScreen({ route }: any) {
     if (route?.params?.modelUri) {
       const uri = route.params.modelUri;
       const name = route.params.modelName || 'modelo.glb';
-      console.log('Modelo desde galería:', name);
       if (viewerReady.current) {
         loadModelFromUri(uri, name);
       } else {
         pendingModel.current = { uri, name };
       }
+    } else if (route?.params?.modelBase64) {
+      // Viene del escáner QR
+      const base64 = route.params.modelBase64;
+      const name = route.params.modelName || 'modelo.glb';
+      if (viewerReady.current) {
+        loadModelFromBase64Direct(base64, name);
+      } else {
+        pendingModel.current = { uri: '', name, base64 };
+      }
     }
-  }, [route?.params?.modelUri]);
+  }, [route?.params?.timestamp]);
 
   const loadModelFromUri = async (uri: string, name: string) => {
     try {
@@ -389,11 +397,14 @@ export default function ARScreen({ route }: any) {
       const msg = JSON.parse(e.nativeEvent.data);
       if (msg.type === 'SCENE_READY') {
         viewerReady.current = true;
-        // Si hay un modelo pendiente desde la galería, cárgalo
         if (pendingModel.current) {
-          const { uri, name } = pendingModel.current;
+          const { uri, name, base64 } = pendingModel.current;
           pendingModel.current = null;
-          loadModelFromUri(uri, name);
+          if (base64) {
+            loadModelFromBase64Direct(base64, name);
+          } else {
+            loadModelFromUri(uri, name);
+          }
         }
       } else if (msg.type === 'ANIMATIONS_READY') {
         setAnimations(msg.animations);
@@ -497,6 +508,53 @@ export default function ARScreen({ route }: any) {
 
   const getDistance = (x1: number, y1: number, x2: number, y2: number) => {
     return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+  };
+
+  const loadModelFromBase64Direct = async (base64: string, name: string) => {
+    try {
+      setLoading(true);
+      const safeName = name.replace(/[`\\$'"]/g, '');
+      const CHUNK = 500000;
+      const chunks: string[] = [];
+      for (let i = 0; i < base64.length; i += CHUNK) {
+        chunks.push(base64.slice(i, i + CHUNK));
+      }
+      webviewRef.current?.injectJavaScript(`
+        window._mb = new Array(${chunks.length});
+        window._mt = ${chunks.length};
+        window._mr = 0;
+        window._mn = '${safeName}';
+        document.getElementById('status').style.display = 'block';
+        document.getElementById('status').textContent = 'Cargando modelo QR...';
+        true;
+      `);
+      for (let i = 0; i < chunks.length; i++) {
+        const escaped = chunks[i]
+          .replace(/\\/g, '\\\\')
+          .replace(/`/g, '\\`')
+          .replace(/\$/g, '\\$');
+        await new Promise<void>((resolve) => {
+          setTimeout(() => {
+            webviewRef.current?.injectJavaScript(`
+              window._mb[${i}] = \`${escaped}\`;
+              window._mr++;
+              if (window._mr === window._mt) {
+                setTimeout(function() {
+                  window.loadModel(window._mb.join(''), window._mn);
+                  window._mb = null;
+                }, 100);
+              }
+              true;
+            `);
+            resolve();
+          }, i * 10);
+        });
+      }
+      setLoading(false);
+    } catch (e) {
+      console.error('Error cargando base64:', e);
+      setLoading(false);
+    }
   };
 
   const panResponder = useRef(
@@ -780,6 +838,12 @@ export default function ARScreen({ route }: any) {
       <View style={styles.bottomBar}>
         <TouchableOpacity style={styles.button} onPress={pickModel}>
           <Text style={styles.buttonText}>📂 Cargar GLB</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, { backgroundColor: 'rgba(108,99,255,0.7)' }]}
+          onPress={() => navigation.navigate('QRScanner')}
+        >
+          <Text style={styles.buttonText}>📷 QR</Text>
         </TouchableOpacity>
         {animations.length > 0 && (
           <TouchableOpacity style={styles.toggleBtn} onPress={() => setShowControls(!showControls)}>

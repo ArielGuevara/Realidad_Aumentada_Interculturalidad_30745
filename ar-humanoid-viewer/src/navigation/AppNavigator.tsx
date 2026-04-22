@@ -9,6 +9,12 @@ import GalleryScreen from '../screens/GalleryScreen';
 import ARScreen from '../screens/ARScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 
+import { Platform } from 'react-native';
+import ARScreenWeb from '../screens/ARScreenWeb';
+import QRScannerScreen from '../screens/QRScannerScreen';
+
+const ARComponent = Platform.OS === 'web' ? ARScreenWeb : ARScreen;
+
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
@@ -43,7 +49,7 @@ function MainTabs() {
       />
       <Tab.Screen
         name="AR"
-        component={ARScreen}
+        component={ARComponent}
         options={{
           tabBarLabel: 'AR Viewer',
           tabBarIcon: ({ focused }) => <TabIcon emoji="📷" focused={focused} />,
@@ -67,6 +73,7 @@ export default function AppNavigator() {
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Welcome" component={WelcomeScreen} />
         <Stack.Screen name="Main" component={MainTabs} />
+        <Stack.Screen name="QRScanner" component={QRScannerScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
